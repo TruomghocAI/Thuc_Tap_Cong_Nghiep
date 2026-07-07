@@ -1,465 +1,147 @@
-# Class-Incremental Multi-Organ CT Segmentation on BTCV
+# Thực Tập Công Nghiệp — Class-Incremental Multi-Organ Segmentation (BTCV)
 
-This repository contains notebooks for preprocessing BTCV abdominal CT data and training class-incremental multi-organ segmentation models.
+Đây là đồ án **Class-Incremental Learning (CIL) cho bài toán phân đoạn đa cơ quan (multi-organ segmentation)** trên bộ dữ liệu CT **BTCV** (Multi-Atlas Labeling Beyond the Cranial Vault), gồm 4 task tuần tự và 13 cơ quan (+ background = 14 lớp). Kiến trúc mô hình: **U-Net / U-Net++ với encoder ResNet-34** (qua thư viện `segmentation_models_pytorch`).
 
-The project studies continual / class-incremental segmentation where organs are learned sequentially over multiple tasks. The current codebase includes preprocessing utilities and several training notebooks:
+Repo so sánh 4 chiến lược:
 
-- Data exploration and preprocessing
-- Fine-tuning baseline
-- Joint training reference
-- Learning without Forgetting (LwF)
-- MiB-style baseline
-- Pixel-Aware EWC baseline
+| Notebook | Chiến lược | Vai trò |
+|---|---|---|
+| `joint_training.ipynb` | Train chung tất cả 13 organ cùng lúc | **Upper bound** (không CIL, để so sánh) |
+| `FineTuning.ipynb` | Fine-tune tuần tự, không có cơ chế chống quên | **Lower bound / Task 1 trainer** |
+| `LwF_baseline.ipynb` | Learning without Forgetting (Li & Hoiem, 2016) | Baseline CIL #1 |
+| `MiB_Baseline.ipynb` | Modeling the Background (Cermelli et al., CVPR 2020) | Baseline CIL #2 |
+| `Pixel‑Aware EWC.ipynb` | Online EWC-style regularization (Kirkpatrick et al., 2017, biến thể) | Baseline CIL #3 |
 
-> Note: The notebooks were originally written for Google Colab. To run locally, you must replace Google Drive paths with local paths.
+Toàn bộ code được viết bằng **tiếng Việt** (comment, print, docstring) và ban đầu được xây dựng để chạy trên **Google Colab (GPU T4, Python 3.10)** với dữ liệu lưu trên Google Drive. README này hướng dẫn cách chạy lại **hoàn toàn trên máy local**.
 
 ---
 
-## 1. Repository Structure
+## 1. Yêu cầu hệ thống
 
-```text
-Thuc_Tap_Cong_Nghiep/
-├── processing data/
-│   └── data_exploration_and_preprocessing.ipynb
-│
-├── source code/
-│   ├── FineTuning.ipynb
-│   ├── joint_training.ipynb
-│   ├── LwF_baseline.ipynb
-│   ├── MiB_Baseline.ipynb
-│   └── Pixel-Aware EWC.ipynb
-│
-├── README.md
-├── LICENSE
-└── .gitignore
-2. Hardware Recommendation
+- Python 3.10+ (khớp với môi trường gốc trên Colab)
+- GPU NVIDIA khuyến nghị ≥ 8 GB VRAM (bản gốc dùng T4 16 GB, `batch_size=16`, ảnh 512×512). Có thể chạy CPU nhưng sẽ rất chậm.
+- ~10–15 GB dung lượng trống (RawData.zip của BTCV + dữ liệu `.npy` đã tiền xử lý + checkpoint).
+- Tài khoản [Synapse](https://www.synapse.org/) để tải bộ dữ liệu BTCV (miễn phí, cần đăng ký).
 
-Recommended:
+## 2. Cài đặt môi trường
 
-OS: Ubuntu / Windows + WSL2 / Windows native
-Python: 3.10
-GPU: NVIDIA GPU with CUDA support
-VRAM: at least 8GB recommended
-RAM: 16GB or higher
-
-CPU-only execution is possible for preprocessing and debugging, but training will be very slow.
-
-3. Environment Setup
-3.1 Clone repository
+```bash
 git clone https://github.com/TruomghocAI/Thuc_Tap_Cong_Nghiep.git
 cd Thuc_Tap_Cong_Nghiep
-3.2 Create Python environment
 
-Using venv:
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-python -m venv .venv
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-Activate environment:
+Nếu chưa có `requirements.txt` trong repo, tạo file với nội dung sau (đã tổng hợp từ toàn bộ `!pip install` + import trong 5 notebook):
 
-Windows:
-
-.venv\Scripts\activate
-
-Linux / macOS:
-
-source .venv/bin/activate
-3.3 Install dependencies
-
-For CUDA GPU, install PyTorch following the official command for your CUDA version.
-
-Example for CUDA 12.1:
-
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-Then install the remaining packages:
-
-pip install segmentation-models-pytorch
-pip install nibabel scipy tqdm matplotlib numpy jupyter ipykernel
-
-Optional but recommended:
-
-pip freeze > requirements.txt
-
-A minimal requirements.txt can be:
-
-torch
-torchvision
-segmentation-models-pytorch
-nibabel
-scipy
+```
+torch>=2.0
+torchvision>=0.15
+segmentation-models-pytorch>=0.3.3
+nibabel>=5.0
+numpy>=1.24
+scipy>=1.10
+jupyterlab
 tqdm
 matplotlib
-numpy
-jupyter
-ipykernel
-4. Dataset Preparation
+pandas
+seaborn
+```
 
-This project uses the BTCV / Multi-Atlas Labeling Beyond the Cranial Vault abdominal CT dataset.
+> Nếu máy có GPU, cài `torch`/`torchvision` theo đúng bản CUDA của máy theo hướng dẫn tại [pytorch.org](https://pytorch.org/get-started/locally/) thay vì bản CPU mặc định.
 
-The original preprocessing notebook expects a file named:
+## 3. Tải & chuẩn bị dữ liệu BTCV
 
-RawData.zip
+1. Đăng ký tài khoản tại [synapse.org](https://www.synapse.org/), tìm project **"Multi-Atlas Labeling Beyond the Cranial Vault"** (BTCV, `syn3193805`) và tải file **`RawData.zip`** (chỉ cần phần **Training** — 30 CT volume có label).
+2. Đặt file zip vào một thư mục local, ví dụ:
+   ```
+   Thuc_Tap_Cong_Nghiep/
+   └── data_raw/RawData.zip
+   ```
 
-Original Colab path:
+## 4. ⚠️ Việc cần sửa trước khi chạy (notebook viết cho Colab)
 
-/content/drive/MyDrive/MultiOrganSeg/RawData.zip
+Cả 5 notebook đều có các cell dành riêng cho Colab, cần sửa để chạy local:
 
-For local execution, use the following structure:
-
-Thuc_Tap_Cong_Nghiep/
-└── data/
-    ├── RawData.zip
-    ├── raw/
-    └── processed/
-        ├── images/
-        ├── masks/
-        └── metadata.json
-
-The BTCV raw structure is expected to be similar to:
-
-RawData/
-├── Training/
-│   ├── img/
-│   └── label/
-└── Testing/
-    └── img/
-
-Only the 30 training CT cases with labels are used for supervised segmentation experiments.
-
-5. Local Path Configuration
-
-The notebooks currently contain Colab-specific paths such as:
-
+**a) Bỏ cell mount Google Drive**
+```python
 from google.colab import drive
 drive.mount('/content/drive')
+```
+Xoá hoặc comment cell này (không tồn tại trong Jupyter/local Python).
 
-DRIVE_ROOT = "/content/drive/MyDrive/MultiOrganSeg"
+**b) Đổi đường dẫn gốc dữ liệu**
 
-For local execution, replace them with:
+Notebook tiền xử lý dùng:
+```python
+PROJECT_NAME = "MultiOrganSeg"
+DRIVE_ROOT   = f"/content/drive/MyDrive/{PROJECT_NAME}"
+```
+còn 4 notebook train (LwF, FineTuning, joint_training, EWC) lại dùng:
+```python
+DRIVE_ROOT = "/content/drive/MyDrive/Multi-Atlas_Labeling_Beyond_the_Cranial_Vault"
+```
+**Đây là hai tên thư mục khác nhau** — nếu giữ nguyên, các notebook train sẽ không tìm thấy dữ liệu do notebook tiền xử lý tạo ra. Bạn cần **chọn một đường dẫn local duy nhất và sửa đồng bộ ở tất cả các notebook**, ví dụ:
+```python
+DRIVE_ROOT = "./data/Multi-Atlas_Labeling_Beyond_the_Cranial_Vault"
+```
+(`MiB_Baseline.ipynb` là ngoại lệ — notebook này đã dùng sẵn đường dẫn local `./data/Multi-Atlas_Labeling_Beyond_the_Cranial_Vault`, không cần sửa phần Drive.)
 
-from pathlib import Path
+**c) Bỏ cell `!pip install ...`** (không bắt buộc, nhưng nếu đã `pip install -r requirements.txt` thì có thể skip để đỡ chạy lại mỗi lần mở notebook).
 
-PROJECT_ROOT = Path.cwd()
-DRIVE_ROOT = PROJECT_ROOT
+## 5. Thứ tự chạy pipeline
 
-RAW_DATA_DIR = DRIVE_ROOT / "data" / "raw"
-PROCESSED_DIR = DRIVE_ROOT / "data" / "processed"
-IMAGES_2D_DIR = PROCESSED_DIR / "images"
-MASKS_2D_DIR = PROCESSED_DIR / "masks"
-METADATA_PATH = PROCESSED_DIR / "metadata.json"
+### Bước 1 — Tiền xử lý dữ liệu
+Chạy `processing data/data_exploration_and_preprocessing.ipynb`:
+- Giải nén `RawData.zip`
+- Ghép cặp ảnh CT ↔ label theo ID (chỉ giữ 30 volume Training có label)
+- Trực quan hoá dữ liệu (overview, class imbalance, 3 views)
+- Tiền xử lý: clip HU về `[-1000, 1000]`, chuẩn hoá `float32 [0,1]`, resize `512×512`, bỏ slice có < 0.5% pixel foreground
+- Xuất ra: `data/processed/images/*.npy`, `data/processed/masks/*.npy`, `data/processed/metadata.json`
 
-CHECKPOINT_DIR = DRIVE_ROOT / "checkpoints"
-LOG_DIR = DRIVE_ROOT / "logs"
+Ảnh CT lưu ra là **2D single-channel** `(512, 512) float32`, mask là `(512, 512) uint8` giá trị 0–13.
 
-for path in [RAW_DATA_DIR, PROCESSED_DIR, IMAGES_2D_DIR, MASKS_2D_DIR, CHECKPOINT_DIR, LOG_DIR]:
-    path.mkdir(parents=True, exist_ok=True)
+### Bước 2 — Tạo checkpoint Task 1 dùng chung
+Cả `LwF_baseline.ipynb`, `MiB_Baseline.ipynb` và `Pixel‑Aware EWC.ipynb` đều **giả định đã có sẵn** file:
+```
+<CHECKPOINT_DIR>/task1_best.pth
+```
+và sẽ báo lỗi `FileNotFoundError` nếu chưa có. File này **không được tạo ra bởi bất kỳ notebook nào trong repo một cách hiển nhiên** — cách để tạo nó là:
 
-If a notebook uses string paths, convert them back with str(...) when needed:
+Mở `FineTuning.ipynb`, đặt `CURRENT_TASK = 1`, chạy toàn bộ notebook. Vì Task 1 không có cơ chế chống quên nào để phân biệt giữa các phương pháp (task đầu tiên luôn là train thường), checkpoint `task1_best.pth` sinh ra từ đây dùng chung cho tất cả các baseline CIL phía sau. Đảm bảo `CHECKPOINT_DIR` của `FineTuning.ipynb` trùng với `CHECKPOINT_DIR` mà `LwF_baseline.ipynb` / `MiB_Baseline.ipynb` / `Pixel‑Aware EWC.ipynb` sẽ đọc (mặc định cùng là `checkpoints_baseline/`).
 
-IMAGES_2D_DIR = str(IMAGES_2D_DIR)
-MASKS_2D_DIR = str(MASKS_2D_DIR)
-METADATA_PATH = str(METADATA_PATH)
-6. Preprocessing
+### Bước 3 — Chạy các baseline
 
-Open and run:
+- **`joint_training.ipynb`** — độc lập, không phụ thuộc `task1_best.pth`. Train một lần trên toàn bộ 13 organ. Chạy toàn bộ notebook.
+- **`FineTuning.ipynb`** — sau khi đã tạo `task1_best.pth` ở Bước 2, đổi `CURRENT_TASK = 2`, chạy lại toàn bộ notebook; lặp lại với `CURRENT_TASK = 3`, rồi `4`. Mỗi lần chạy tự load checkpoint của task liền trước.
+- **`LwF_baseline.ipynb`** — chạy toàn bộ notebook, vòng lặp `STARTING_TASK → 4` tự động train Task 2, 3, 4 với knowledge distillation từ teacher là checkpoint task liền trước.
+- **`MiB_Baseline.ipynb`** — tương tự LwF nhưng dùng kỹ thuật Modeling-the-Background; `ALPHA_PER_TASK` đã tune sẵn `{1:0.0, 2:0.3, 3:0.5, 4:0.6}`.
+- **`Pixel‑Aware EWC.ipynb`** — tính Fisher Information từ checkpoint Task 1, sau đó phạt thay đổi trọng số quan trọng khi train Task 2→4.
 
-processing data/data_exploration_and_preprocessing.ipynb
+Tất cả (trừ `FineTuning.ipynb`) có thể **Run All** một lần từ đầu đến cuối; `FineTuning.ipynb` cần chạy lại thủ công 4 lần (đổi `CURRENT_TASK`).
 
-The preprocessing notebook performs:
+## 6. Kết quả đầu ra
 
-Install and import required libraries.
-Load RawData.zip.
-Extract raw NIfTI files.
-Pair CT images with label masks.
-Visualize CT slices and segmentation masks.
-Convert 3D CT volumes into axial 2D .npy slices.
-Save processed images, masks, and metadata.
+Sau khi chạy, mỗi notebook ghi ra thư mục con của `DRIVE_ROOT`/`DATA_ROOT`:
 
-Default preprocessing configuration:
+- `checkpoints_baseline/` hoặc `checkpoints_ewc_v2/`: các file `.pth` (model, optimizer, scheduler, epoch, seed, config...)
+- `logs_baseline/` hoặc `logs_ewc_v2/`: log JSON theo từng task, per-organ DSC/mIoU
+- Ma trận hiệu năng CIL `R[i][j]` (Task i đánh giá trên organ của Task j) cùng các chỉ số dẫn xuất: **Average Accuracy, Forgetting, Backward Transfer**, tính trên **test set niêm phong (sealed)** — chỉ chạy 1 lần sau khi đã train xong toàn bộ, không dùng để chọn hyperparameter.
 
-CFG = {
-    "hu_min": -1000,
-    "hu_max": 1000,
-    "target_size": (512, 512),
-    "min_fg_ratio": 0.005,
-}
+## 7. Một số lưu ý quan trọng (phát hiện khi đọc code)
 
-Each valid slice is processed as:
+- **`LwF_baseline.ipynb` có lỗi khiến notebook không chạy được ngay**: hàm `ensure_ct_25d_array(...)` được gọi trong `BTCVDataset.__getitem__` nhưng **không được định nghĩa ở đâu trong notebook**; đồng thời code còn tham chiếu `TRAIN_CFG["in_channels"]` và `TRAIN_CFG["num_slices"]`, hai key này **không tồn tại** trong `TRAIN_CFG`. Notebook cũng dùng `smp.UnetPlusPlus(in_channels=3, ...)` — tức kỳ vọng ảnh đầu vào 2.5D 3-kênh — trong khi notebook tiền xử lý ở Bước 1 chỉ xuất ảnh **2D 1-kênh**. Bạn cần tự bổ sung hàm `ensure_ct_25d_array` (ví dụ: lặp lại slice 2D thành 3 kênh, hoặc đơn giản hơn là đổi sang `smp.Unet(in_channels=1, ...)` giống các notebook khác) và thêm 2 key còn thiếu vào `TRAIN_CFG` trước khi chạy.
+- **Cách định nghĩa Task khác nhau giữa các notebook**: `LwF_baseline.ipynb` dùng `TASK_ORGANS = {1: [6,7,1], 2: [2,3,11], 3: [8,9,10], 4: [4,5,12,13]}`, trong khi `MiB_Baseline.ipynb`, `Pixel‑Aware EWC.ipynb`, `FineTuning.ipynb`, `joint_training.ipynb` lại dùng cách chia theo kích thước cơ quan (lớn → nhỏ): `{1: [6,7], 2: [1,2,3,8], 3: [4,9,10,11], 4: [5,12,13]}`. Nếu muốn so sánh công bằng giữa các phương pháp, cần thống nhất lại `TASK_ORGANS` giữa các notebook.
+- `MiB_Baseline.ipynb` và `Pixel‑Aware EWC.ipynb` có cơ chế kiểm tra `assert_checkpoint_compatible()` dựa trên `split_checksum`/`config_hash`/`seed` ghi trong checkpoint; checkpoint Task 1 tạo từ `FineTuning.ipynb` (Bước 2) không có các trường này nhưng được code cho phép qua với cảnh báo "LEGACY WARNING" — đây là hành vi được thiết kế có chủ đích, không phải lỗi.
+- Notebook `Pixel‑Aware EWC.ipynb` tự nhận là **"Online EWC-style regularization baseline"**, không phải cài đặt EWC gốc/offline theo Kirkpatrick et al. (2017) — nên khi báo cáo kết quả, gọi đúng tên này để tránh gây hiểu nhầm.
 
-CT slice:
-    HU clipping [-1000, 1000]
-    normalization to [0, 1]
-    resize to 512×512
-    save as float32 .npy
+## 8. Giấy phép
 
-Mask slice:
-    resize to 512×512 using nearest-neighbor interpolation
-    save as uint8 .npy with labels 0–13
-
-Expected output:
-
-data/processed/
-├── images/
-│   ├── img0001_slice_XXXX.npy
-│   └── ...
-├── masks/
-│   ├── img0001_slice_XXXX.npy
-│   └── ...
-└── metadata.json
-7. Important Note: 2D vs 2.5D Input
-
-The current preprocessing notebook saves single axial slices as 2D arrays:
-
-CT:   (512, 512)
-Mask: (512, 512)
-
-However, some training notebooks expect 2.5D input with 3 adjacent CT slices:
-
-CT:   (3, 512, 512)
-Mask: (512, 512)
-
-Therefore, before running LwF / MiB / EWC notebooks, check the expected input shape in the dataset class.
-
-If the training notebook expects 2.5D, preprocessing should be updated to save 3-slice stacks:
-
-[center - 1, center, center + 1]
-
-At volume boundaries, use clamping:
-
-prev_idx = max(center_idx - 1, 0)
-next_idx = min(center_idx + 1, num_slices - 1)
-
-Then save CT as:
-
-ct_25d = np.stack([slice_prev, slice_center, slice_next], axis=0)
-
-Expected shape:
-
-(3, 512, 512)
-
-This step is required for training notebooks that assert in_channels = 3.
-
-8. Training Notebooks
-
-Training notebooks are located in:
-
-source code/
-
-Recommended running order:
-
-8.1 Joint Training
-source code/joint_training.ipynb
-
-Purpose:
-
-Trains on all selected organs together.
-Can be used as an upper-bound reference.
-8.2 Fine-Tuning Baseline
-source code/FineTuning.ipynb
-
-Purpose:
-
-Sequentially trains the model on new organ groups.
-Does not explicitly protect old knowledge.
-Serves as the lower-bound continual learning baseline.
-8.3 LwF Baseline
-source code/LwF_baseline.ipynb
-
-Purpose:
-
-Uses a frozen teacher model from the previous task.
-Trains the current student using segmentation loss plus knowledge distillation loss.
-Does not use replay memory.
-
-Typical configuration:
-
-TRAIN_CFG = {
-    "batch_size": 16,
-    "lr": 3e-4,
-    "n_epochs": 50,
-    "save_every": 10,
-    "num_workers": 2,
-    "loss_alpha": 0.5,
-    "encoder": "resnet34",
-    "pretrained": "imagenet",
-    "num_classes": 14,
-    "seed": 42,
-}
-
-LWF_ALPHA = 1.0
-LWF_TEMPERATURE = 2.0
-8.4 MiB Baseline
-source code/MiB_Baseline.ipynb
-
-Purpose:
-
-Implements a MiB-style class-incremental segmentation baseline.
-Designed to better handle background shift compared with plain LwF-style training.
-8.5 Pixel-Aware EWC
-source code/Pixel-Aware EWC.ipynb
-
-Purpose:
-
-Implements an online diagonal empirical Fisher / EWC-style regularization baseline.
-Intended as a regularization-based continual learning baseline.
-9. Organ Labels
-
-The project uses 14 segmentation classes:
-
-Label	Organ
-0	Background
-1	Spleen
-2	Right Kidney
-3	Left Kidney
-4	Gallbladder
-5	Esophagus
-6	Liver
-7	Stomach
-8	Aorta
-9	IVC
-10	Portal Vein
-11	Pancreas
-12	Right Adrenal
-13	Left Adrenal
-10. Example Local Running Workflow
-Step 1: Prepare environment
-git clone https://github.com/TruomghocAI/Thuc_Tap_Cong_Nghiep.git
-cd Thuc_Tap_Cong_Nghiep
-
-python -m venv .venv
-.venv\Scripts\activate   # Windows
-# source .venv/bin/activate  # Linux/macOS
-
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install segmentation-models-pytorch nibabel scipy tqdm matplotlib numpy jupyter ipykernel
-Step 2: Put dataset in place
-data/RawData.zip
-Step 3: Run preprocessing notebook
-jupyter notebook
-
-Open:
-
-processing data/data_exploration_and_preprocessing.ipynb
-
-Modify path variables for local execution, then run all cells.
-
-Step 4: Verify processed data
-
-Expected files:
-
-data/processed/images/*.npy
-data/processed/masks/*.npy
-data/processed/metadata.json
-Step 5: Run training notebook
-
-Open one of:
-
-source code/FineTuning.ipynb
-source code/LwF_baseline.ipynb
-source code/MiB_Baseline.ipynb
-source code/Pixel-Aware EWC.ipynb
-source code/joint_training.ipynb
-
-Before running, update:
-
-DRIVE_ROOT
-IMAGES_2D_DIR
-MASKS_2D_DIR
-METADATA_PATH
-CHECKPOINT_DIR
-LOG_DIR
-
-to local paths.
-
-11. Outputs
-
-Training notebooks usually save:
-
-checkpoints/
-logs/
-
-Typical outputs include:
-
-model checkpoints .pth
-per-task training logs
-validation metrics
-Dice / IoU reports
-continual learning evaluation results
-12. Reproducibility Notes
-
-For reproducible experiments:
-
-Use a fixed random seed.
-Use the same train/validation/test volume split.
-Avoid slice-level data leakage.
-Save metadata.json and volume_split.json.
-Report environment information:
-Python version
-PyTorch version
-CUDA version
-GPU name
-cuDNN version
-Keep validation and test sets separated.
-Use the validation set only for checkpoint selection.
-Use the test set only for final reporting.
-
-Recommended deterministic settings:
-
-import random
-import numpy as np
-import torch
-
-seed = 42
-
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)
-
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-13. Known Issues / Things to Check Before Running
-13.1 Colab-specific code
-
-Remove or comment out:
-
-from google.colab import drive
-drive.mount('/content/drive')
-
-when running locally.
-
-13.2 Hard-coded Google Drive paths
-
-Replace paths like:
-
-/content/drive/MyDrive/...
-
-with local paths.
-
-13.3 2D vs 2.5D mismatch
-
-Check whether your training notebook expects:
-
-(512, 512)
-
-or:
-
-(3, 512, 512)
-
-If the model uses in_channels=3, the preprocessing output must be 2.5D.
-
-13.4 Dataset not included
-
-The BTCV raw dataset is not included in this repository. Users must download it separately and place it as:
-
-data/RawData.zip
-13.5 Large checkpoints
-
-Model checkpoints should not be committed to GitHub. Keep them in:
-
-checkpoints/
-
-and add them to .gitignore if needed.
+Phát hành theo **MIT License** — xem file [`LICENSE`](./LICENSE).
 
 14. Citation / Acknowledgement
 
